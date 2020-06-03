@@ -1,0 +1,8 @@
+._*
+.DS_Store
+.Rhistory
+*.html
+.here
+figures
+Rmd/paper_figures_cache/
+Rmd/paper_figures_files/

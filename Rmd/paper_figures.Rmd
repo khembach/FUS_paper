@@ -1,0 +1,1122 @@
+---
+title: "Paper figures"
+author: "Katharina Hembach"
+date: "12/17/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if (!knitr::is_latex_output()) {
+  knitr::opts_chunk$set(dpi = 300, dev.args = list(png = list(type = "cairo")))
+}
+```
+
+This Rmarkdown contains the R code for some of the figures of our FUS paper. These are mostly the figures that are based on the RNA-seq data.
+
+All figures from the FUS target identification based on the CLIP-seq and MA-plot are defined in `/home/Shared_taupo/data/seq/sonu_CLIPseq/clip_March2018/Rmd/target_gene_selection_analysis.html`.
+
+
+# Load packages and DGE results
+
+```{r packages}
+suppressPackageStartupMessages({
+  library(here)
+  library(dplyr)
+  library(SingleCellExperiment)
+  library(ggplot2)
+  library(RColorBrewer)
+  library(stringr)
+  library(eulerr)
+  # library(ggforce)
+  library(ComplexHeatmap)
+  library(ggrepel)
+  library(tibble)
+  # library(biomaRt)
+  # library(rtracklayer)
+  # library(sva)
+  # library(umap)
+  # library(limma)
+  # library(pathview)
+  # library(tidyr)
+  library(scales)
+  # library(cowplot)
+  library(ggsci)
+  # library(fs)
+  library(circlize)
+  library(data.table)
+  library(ggExtra)
+})
+set_here("..")
+```
+
+
+```{r file-names, cache = TRUE}
+se <- "/home/Shared/data/seq/sonu_RNAseq/polyA_Aug2019/output/outputR/edgeR_dge.rds" 
+## Manually filtered list of target genes (genes on the wrong strand are removed)
+fus_targets <- "/home/Shared/data/seq/sonu_CLIPseq/clip_March2018/analysis/deduplicated/MA_plot_selection/top_peaks_loess_adjM_pValue_1e-05_gene_anno_manually_filtered.txt"
+
+ms_results <- "/home/Shared/data/seq/sonu_RNAseq/polyA_Aug2019/mass_spec/MQ_report_RNAseq_CLIPtargets.txt"
+ms_2_results <- "/home/Shared/data/seq/sonu_RNAseq/polyA_Aug2019/mass_spec/MQ_report_experiment2_RNAseq_CLIPtargets.txt"
+rnaseq_dir <- "/home/Shared/data/seq/sonu_RNAseq/polyA_Aug2019/"
+gtf_file <- "/home/Shared/data/annotation/Mouse/Ensembl_GRCm38.90/gtf/Mus_musculus.GRCm38.90.gtf"
+
+fig_dir <- here("figures")
+```
+
+We load the `SummarizedExperiment` objects prepared using `tximeta`, containing
+gene- and transcript-level counts and feature lengths. In this report, we will
+use the gene-level quantifications.
+
+```{r edgeR-se, cache = TRUE, dependson = "file-names"}
+se <- readRDS(se)
+## List of SummarizedExperiment objects (gene/transcript level)
+se
+
+## Get gene-level SummarizedExperiment object
+sg <- se$sg
+metadata <- colData(sg)
+sg
+
+##log2 counts per million
+logcpms <- assay(sg, "logcpm")
+```
+
+
+# PCA plots
+
+We use the logCPM values for PCA, because they are normalized for library size and transcript length.
+Only a subset of all genes was used for the DE analysis with edgeR. Lowly expressed genes were filtered out with the edgeR function `filterByExpr` and we use the same set of genes for the PCA plot.
+
+It keeps all gene with a CPM of at least 10/median library size*1e6 in 4 replicates (the size of the smallest group, here the nuclear samples). Additionally, each kept gene is required to have at lesst 15 counts across all samples.
+
+
+```{r PCA-plot, cache = TRUE, dependson = "edgeR-se"}
+## Filter out all genes that were not used for the DE analysis (they are NA)
+g <- rowData(sg)[["edgeR:groupSNS.KI.6_mo-groupSNS.WT.6_mo"]] %>% 
+  as.data.frame %>% rownames_to_column("rowname") %>% 
+  dplyr::filter(!is.na(logFC)) %>% dplyr::pull(rowname)
+logcpms_part <- logcpms[g,]
+## We need genes as columns --> transpose
+pca <- prcomp(t(logcpms_part))
+
+#Determine the proportion of variance of each component
+#Proportion of variance equals (PC stdev^2) / (sum all PCs stdev^2)
+proportionvariances <- ((pca$sdev^2) / (sum(pca$sdev^2)))*100
+proportionvariances <- round(proportionvariances, digits = 0)
+
+## PCA plot
+pca_x <- as.data.frame(pca$x) %>% tibble::rownames_to_column(var = "names") %>%
+    dplyr::full_join(data.frame(colData(sg)), by = "names")
+
+ggplotPCA <- function(dat, x = "PC1", y = "PC2", color = "group", 
+                      shape = "genotype", 
+                      color_pal = c(brewer.pal(8,name = "Dark2"), "black"),
+                      var_explained_x = 0, var_explained_y = 0){
+  ggplot(dat, aes_string(x = x, y = y, color = color, shape = shape)) +
+    geom_point(size = 3, alpha = 0.8) +
+    theme_bw(base_size = 16) +
+    scale_color_manual(values = color_pal) + 
+    theme(aspect.ratio = 1) + 
+    labs(x = paste0(x, "(", var_explained_x, "%)"), 
+         y = paste0(y, "(", var_explained_y, "%)"))
+}
+
+## custom colors for Magda
+pca_x$preparation.age <- factor(paste0(pca_x$fraction, ".", pca_x$age), 
+                                levels = c("H.1_mo", "H.6_mo", "SNS.1_mo", 
+                                           "SNS.6_mo", "N.1_mo") )
+
+p <- ggplotPCA(pca_x, x = "PC1", y = "PC3", shape = "genotype", 
+          color = "preparation.age", 
+          color_pal = c(brewer.pal(5, name = "Paired")), 
+          var_explained_x = proportionvariances[1], 
+          var_explained_y = proportionvariances[3])
+p
+ggsave(file.path(fig_dir, "fig3_supp", "PCA_PC1_3.pdf"), p, width = 7, height = 5)
+
+p <- ggplotPCA(pca_x, x = "PC1", y = "PC2", shape = "genotype", 
+          color = "preparation.age", 
+          color_pal = c(brewer.pal(5, name = "Paired")), 
+          var_explained_x = proportionvariances[1], 
+          var_explained_y = proportionvariances[2])
+p
+ggsave(file.path(fig_dir, "fig3_supp", "PCA_PC1_2.pdf"), p, width = 7, height = 5)
+```
+
+
+# Volcano Plots
+
+We are mostly intersted in the comparison between genotypes at a specific timepoint.
+
+We want to label some genes that were hand picked from the list of FUS targets.
+
+```{r volcano-gene-labels, cache = TRUE}
+gene_labels <- c("Fus", "Sv2a", "Syt1", "Syp", "App", "Atp1a1", "Atp1a3", 
+                 "Atp1b1", "Gabra1", "Grin1", "Gria2", "Gria3", "Ahcyl1", 
+                 "Reep3", "Hnrnpd")
+```
+
+
+```{r volcano-prep, cache = TRUE}
+## select the ones we are interested in:
+comp <- names(rowData(sg))[7:10]
+
+## Determine the maximal logFC range in all comparisons
+x_range <- 0
+y_range <- 0
+for (i in comp){
+  dat <- rowData(sg)[[i]]
+  dat <- dat[!is.na(dat$PValue),]
+  x_range<- max(x_range, max(abs(dat$logFC)))
+  y_range <- max(y_range, max(-log10(dat$FDR)))
+}
+x_range
+y_range
+```
+
+
+```{r "volcano-plot-function", cache = TRUE}
+## Volcano plot with labeled genes (top p-value or logFC)
+ggplotVolcano <- function(dat, title, outfile, alpha = 0.8, FUS_targets = NULL, 
+                          color_targets = FALSE, gene_labels = NULL,
+                          # label = "both", 
+                          label_coord = 1.5, 
+                          x_range = NULL, y_range = NULL){
+
+  dat <- dat[!is.na(dat$PValue),]
+  dat$mlog10FDR <- -log10(dat$FDR)
+  df <- data.frame(logFC = dat$logFC, mlog10FDR = dat$mlog10FDR, 
+                      FDR = dat$FDR, gene = dat$gene_name)
+  
+  p <- ggplot(df, aes(x = logFC, y = mlog10FDR))
+   
+  if(is.null(FUS_targets)){
+    cols <- as.factor(ifelse(df$FDR <= 0.05, 
+                             ifelse(df$logFC > 0, "logFC \u2264 0.05 & logFC > 0",  
+                                    "logFC \u2264 0.05 & logFC < 0"), "logFC > 0.05"))
+    # repel <- df %>% filter(FDR <= 0.05) %>% arrange(desc(mlog10FDR))
+    p <- p + geom_point(alpha = alpha, aes(color = cols)) +
+      scale_color_manual(values = c("logFC \u2264 0.05 & logFC > 0" = "#882255", 
+                                    "logFC \u2264 0.05 & logFC < 0" = "#117733",
+                                    "logFC > 0.05" = "darkgrey"))
+  } else {
+    # repel <- df %>% filter(gene %in% FUS_targets) %>% 
+    #   arrange(desc(mlog10FDR))
+    if (color_targets){
+     df$cols <- as.factor(ifelse(df$gene %in% fus_genes, "FUS target",
+                              ifelse(df$FDR <= 0.05, 
+                                     ifelse(df$logFC > 0, "FDR \u2264 0.05 & logFC > 0",  
+                                            "FDR \u2264 0.05 & logFC < 0"), "FDR > 0.05")))
+      p <- p + geom_point(data = df %>% dplyr::arrange(cols), 
+                          aes(color = cols), alpha = alpha) + 
+        scale_color_manual(values = c("FUS target" = "steelblue3", 
+                                      "FDR > 0.05" = "darkgrey", 
+                                      "FDR \u2264 0.05 & logFC > 0" = "#882255", 
+                                      "FDR \u2264 0.05 & logFC < 0" = "#117733"))
+     } else{
+      p <- p + geom_point(data = df %>% filter(!gene %in% FUS_targets), 
+                   aes(color = "darkgrey"), alpha = alpha) + 
+        geom_point(data = df %>% filter(gene %in% FUS_targets),
+               aes(color = "red"), alpha = alpha) +
+      scale_color_manual(name = "FUS targets", labels = c("FALSE", "TRUE"), 
+                         values = c("darkgrey", "red"))
+    }
+  }
+  p <- p + ggtitle(str_split(title, ":", simplify = TRUE)[,2]) +
+    theme_bw() +
+    theme(text = element_text(size = 16)) + 
+    ylab("-log10(FDR)") 
+  
+  if(!is.null(gene_labels)){
+    repel <- df %>% filter(gene %in% gene_labels) %>% 
+      arrange(desc(mlog10FDR))
+    p <- p + geom_text_repel(data = repel %>% filter(logFC > 0), 
+                           aes(label = gene), xlim = c(label_coord, NA), 
+                           segment.color = "grey30", show.legend = FALSE) +
+      geom_text_repel(data = repel %>% filter(logFC < 0), 
+                      aes(label = gene), xlim = c(NA, -label_coord), 
+                      segment.color = "grey30", show.legend = FALSE)
+  }
+  
+  # if (label == "both"){
+  #   top <- repel %>% dplyr::slice(1:10)
+  #   if (nrow(repel) > 10){
+  #     repel <- repel %>% dplyr::slice(11:n()) %>% arrange(desc(abs(logFC))) %>% 
+  #     dplyr::slice(1:15) %>% rbind(top)
+  #   } else {
+  #   repel <- top 
+  #   }
+  # } else if(label == "top"){
+  #   repel <- repel %>% dplyr::slice(1:15)
+  # } else if (label == "logFC"){
+  #   repel <- repel %>% arrange(desc(abs(logFC))) %>% 
+  #     dplyr::slice(1:15) %>% rbind(top)
+  # }
+   
+  ## x and y-axis range
+  if(!is.null(x_range) & !is.null(y_range)){
+      p <- p + coord_cartesian(xlim = c(-x_range, x_range), ylim = c(0, y_range))
+  }
+  
+  ## draw line at FDR cutoff and end x = 0 
+  p <- p + theme(aspect.ratio = 1) + 
+    geom_hline(yintercept = -log10(0.05), linetype="dashed", color = "black")  +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "black")
+  
+  ## remove legend title
+  p <- p + theme(legend.title=element_blank()) + xlab("log2 fold change")
+   
+  print(p)
+  ggsave(filename = outfile, plot = p, width = 8, height = 6, type = "cairo", 
+         dpi = 500)
+}
+```
+
+```{r volcano-plots1,  warning = TRUE, cache = TRUE, dependson = c("edgeR-se", "volcano-prep", "volcano-plot-function")}
+for (i in comp[c(1,3)]){  ## total
+  file_name <- file.path(fig_dir, "fig3_supp", paste0("volcano_",
+                      str_split(i, ":", simplify = TRUE)[,2], ".png"))
+  ggplotVolcano(rowData(sg)[[i]], title = i, file_name, label_coord = 2.5, 
+                x_range = x_range, y_range = y_range, gene_labels = gene_labels)
+}
+
+for (i in comp[c(2,4)]){  ## SNS
+  file_name <- file.path(fig_dir, "fig3", paste0("volcano_",
+                      str_split(i, ":", simplify = TRUE)[,2], ".png"))
+  ggplotVolcano(rowData(sg)[[i]], title = i, file_name, label_coord = 2.5, 
+                x_range = x_range, y_range = y_range, gene_labels = gene_labels)
+}
+```
+
+## Volcano plot with labeled FUS target genes
+
+```{r volcano-FUS-targets, cache = TRUE, dependson = c("edgeR-se", "volcano-prep", "volcano-plot-function")}
+fus <- read.table(fus_targets, header = TRUE)
+fus_genes <- fus$gene_name
+
+for (i in comp[c(1,3)]){  ## total
+  file_name <- file.path(fig_dir, "fig3_supp", paste0("volcano_",
+                      str_split(i, ":", simplify = TRUE)[,2], "_FUS_targets.png"))
+  ggplotVolcano(rowData(sg)[[i]], title = i, file_name, FUS_targets = fus_genes, 
+                color_targets = TRUE, alpha = 0.8,
+                label_coord = 2.5, 
+                x_range = x_range, y_range = y_range, gene_labels = gene_labels)
+}
+
+for (i in comp[c(2,4)]){  ## SNS
+  file_name <- file.path(fig_dir, "fig3", paste0("volcano_",
+                      str_split(i, ":", simplify = TRUE)[,2], "_FUS_targets.png"))
+  ggplotVolcano(rowData(sg)[[i]], title = i, file_name, FUS_targets = fus_genes, 
+                color_targets = TRUE, alpha = 0.8,
+                label_coord = 2.5, 
+                x_range = x_range, y_range = y_range, gene_labels = gene_labels)
+}
+```
+
+
+# Venn diagram of FUS targets and altered RNAs
+
+List of the up and down regulated genes
+
+```{r}
+sns_6mo <- rowData(sg)[[comp[4]]]
+sns_6mo <- sns_6mo %>% as.data.frame %>% arrange(FDR)
+sns_6mo <- list(res = sns_6mo, 
+                up = sns_6mo %>% filter(FDR <= 0.05 & logFC > 0),
+                down = sns_6mo %>% filter(FDR <= 0.05 & logFC < 0))
+```
+
+Venn diagram of the FUS targets and the genes that are down and up-regulated in RNA-seq.
+
+```{r}
+venn_diag <- euler(list("down\nregulated" = sns_6mo[["down"]]$gene_name, 
+                        "FUS targets" = fus_genes, 
+                        "up regulated" = sns_6mo[["up"]]$gene_name),
+                    shape = "circle")
+
+eulerr_options(labels = list(fontsize = 20), 
+               quantities = list(fontsize = 20, font = 2), 
+               fills = list(alpha = 0.5),
+               padding = unit(0.6, "lines"))
+
+p <- plot(venn_diag,font=1, 
+     fills=c("#117733","steelblue3", "#882255"),
+     edges=c("#117733","steelblue3", "#882255"),
+     labels = list(col = c("#117733","steelblue4", "#882255")),
+     quantities = TRUE,
+     alpha=0.6, lwd = 4, adjust_labels = FALSE)
+p
+pdf(file.path(fig_dir, "fig3", "Euler_FUS_targets_RNAseq_down_up.pdf"), width = 5.5, height = 6)
+p
+dev.off()
+
+
+## without labels
+venn_diag <- euler(list("down\nregulated" = sns_6mo[["down"]]$gene_name, 
+                        "FUS targets" = fus_genes, 
+                        "up regulated" = sns_6mo[["up"]]$gene_name),
+                    shape = "circle")
+
+eulerr_options(labels = list(fontsize = 20), 
+               quantities = list(fontsize = 20, font = 2), 
+               fills = list(alpha = 0.5),
+               padding = unit(0.6, "lines"))
+
+p <- plot(venn_diag, font=1, 
+     fills=c("#117733","steelblue3", "#882255"),
+     edges=c("#117733","steelblue3", "#882255"),
+     labels = FALSE,
+     quantities = TRUE,
+     alpha=0.6, lwd = 4, adjust_labels = FALSE)
+p
+pdf(file.path(fig_dir, "fig3", "Euler_FUS_targets_RNAseq_down_up_no_labels.pdf"), width = 5.5, height = 6)
+p
+dev.off()
+```
+
+
+## UpSet plot
+
+We manually need to create the mixed colors.
+```{r, eval = FALSE}
+library(colorspace)
+##  "#117733" = rgb(17,119,51)
+## steelblue3 = rgb(79,148,205)
+## "#882255" = rgb(136,34,85)
+
+down_mix <- mixcolor(0.5, RGB(17,119,51), RGB(79,148,205)) ## rgb(48, 114, 128) hex#307280
+up_mix <- mixcolor(0.5, RGB(79,148,205), RGB(136,34,85)) ##rgb(108, 91, 145) hex #6c5b91
+```
+
+```{r}
+pdf(file.path(fig_dir, "fig3", "UpSet_FUS_targets_RNAseq_down_up.pdf"), 
+    width = 6, height = 3)
+
+sets <- list(RNAseq_up = sns_6mo[["up"]]$gene_name, FUS_targets = fus_genes, 
+             RNAseq_down = sns_6mo[["down"]]$gene_name)
+comb_mat <- make_comb_mat(sets, mode = "distinct")
+col_size = comb_size(comb_mat)
+row_size = set_size(comb_mat)
+comb_size(comb_mat)
+comb_order <- c(3, 5, 2, 4, 1)
+# c("#117733", "#307280", "steelblue3", "#6c5b91", "#882255") ## desired color order
+ups <- UpSet(comb_mat, set_order = c("RNAseq_down", "FUS_targets", "RNAseq_up"),
+             comb_order = comb_order,
+      comb_col = c("#882255","steelblue3", "#117733", "#6c5b91", "#307280"), 
+      pt_size = unit(5, "mm"),
+      right_annotation = upset_right_annotation(comb_mat, 
+                                                gp = gpar(fill = c("#882255","steelblue3", "#117733"))))
+ups = draw(ups, padding = unit(c(2, 2, 5, 10), "mm"))
+
+col_od = column_order(ups)
+row_od = row_order(ups)
+
+decorate_annotation("Intersection\nsize", {
+	grid.text(col_size[col_od], 
+		seq_len(length(col_size)), 
+		unit(col_size[col_od], "native") + unit(2, "mm"), 
+		default.units = "native", just = "bottom",
+		gp = gpar(fontsize = 12))
+})
+decorate_annotation("Set size", {
+	grid.text(row_size[row_od], 
+		unit(row_size[row_od], "native") + unit(5, "mm"), 
+		rev(seq_len(length(row_size))), 
+		default.units = "native", just = "bottom",
+		gp = gpar(fontsize = 12))
+})
+
+dev.off()
+
+```
+
+
+# Heatmap
+
+Heatmap of the DE genes in SNS 6 month comparison. 
+We use the logCPM values of each sample and compute a Z-score.
+
+```{r}
+## Extended metadata
+ext_metadata <- read.table("/home/Shared/data/seq/sonu_RNAseq/polyA_Aug2019/extended_metadata.txt", 
+                           header = TRUE, stringsAsFactors = FALSE)
+```
+
+
+
+```{r}
+## Top 1000 genes with lowest FDR value at 6 months in SNS KI vs. WT
+sns_6m <- rowData(sg)[[comp[4]]] %>% as.data.frame %>% 
+  rownames_to_column("rownames") %>%
+  arrange(FDR) %>% dplyr::filter(FDR <= 0.05) 
+
+# sns_6m_top <- sns_6m %>% pull(rownames)
+# ## split the rows based on UP and DOWN regulated genes
+de_direction <- sns_6m %>% pull(logFC)
+de_direction <- ifelse(de_direction > 0, "up", "down")
+
+sns_6m <- sns_6m %>% dplyr::select(rownames, logFC) %>% 
+  mutate(DE = ifelse(logFC > 0, "up", "down"))
+
+## The logCPM values of the SNS samples and the top 1000 genes
+sns_metadata <-  metadata %>% as.data.frame %>%
+  dplyr::filter(fraction == "SNS")
+sns_ext_metadata <- ext_metadata %>% dplyr::filter(fraction == "SNS")
+
+
+## Top 1000 genes with lowest FDR value at 6 months in homogenate KI vs. WT
+comp[3]
+total_metadata <-  metadata %>% as.data.frame %>%
+  dplyr::filter(fraction == "H")
+total_ext_metadata <- ext_metadata %>% dplyr::filter(fraction == "H")
+
+total_samples <- metadata %>% as.data.frame %>%
+  dplyr::filter(fraction == "H") %>%
+  pull(names)
+```
+
+
+Custom heatmap function for our RNA-seq data, where you only need to specify the matrix and the legend name.
+
+```{r}
+custom_heatmap <- function(mat, mat_type, mat_title, metadata, outfile){
+  
+  col_fun = colorRamp2(c(quantile(mat, 0.01), 0, 
+                         quantile(mat, 0.99)), 
+                       c("#117733", "white", "#882255"))
+  
+  gender_col <- c("Male" = "#332288", "Female" = "#CC6677")
+  batch_col <- c("batch1" = "#88CCEE", "batch2" = "#DDCC77", 
+                 "batch3" = "#44AA99", "batch4" = "#7A8FFF",
+                 "batch6" = "#F8F099", "batch7" = "#5FF342")
+  fraction_col <- c("total" = "#5AC9A8", "SNS" = "#4D061E")
+  genotype_col <- c("WT" = "#AAC957", "KI" = "#177BCB")
+  age_col <- c("1 month" = "#CA7339", "6 months" = "#951834")
+  
+  ha <- HeatmapAnnotation(gender = metadata$gender, 
+                batch = metadata$batch,
+                fraction = metadata$fraction,
+                genotype = metadata$genotype,
+                age = metadata$age,
+                col = list(gender = gender_col, batch = batch_col, 
+                           fraction = fraction_col, genotype = genotype_col,
+                           age = age_col),
+                annotation_name_side = "left")
+
+  hm <- Heatmap(mat, name = mat_type, 
+                column_title = mat_title,
+                col = col_fun, 
+                column_split = data.frame(
+                  factor(metadata$fraction, levels = c("SNS", "total")),
+                  factor(metadata$age, levels = unique(metadata$age)), 
+                  factor(metadata$genotype, 
+                         levels = unique(metadata$genotype))),
+                row_split = de_direction, top_annotation = ha,
+                show_column_names = FALSE, cluster_column_slices = FALSE,
+                cluster_rows = FALSE, show_row_dend = FALSE,
+                column_dend_height = unit(0.5, "cm"), row_title_rot = 0,
+                row_gap = unit(2, "mm"), 
+                column_gap = unit(c(1, 4, 1, 4, 1, 4, 1), "mm"))
+  
+  pdf(file = outfile, width = 9, height = 7)
+  draw(hm,merge_legend = TRUE, ht_gap = unit(0.5, "cm"))
+  dev.off()
+  draw(hm,merge_legend = TRUE, ht_gap = unit(0.5, "cm"))
+}
+```
+
+
+## Z-score per comparison
+We compute the z-scores per comparison (KI and WT samples of one origin and time point) and we correct for possible batch effects of gender and batch.
+
+```{r}
+# set global variable to use a faster clustering method
+ht_opt$fast_hclust = TRUE
+## globally set the size of the column annotation bar
+ht_opt$simple_anno_size <- unit(4, "mm")
+
+sns_total_ext_metadata <- ext_metadata %>% dplyr::filter(fraction != "N")
+
+mat <- sns_6m %>% left_join(logcpms %>% as.data.frame %>%
+                              rownames_to_column("rownames") %>%
+                              dplyr::select(-contains("_WT_N"), rownames)) %>% 
+  dplyr::select(-c(rownames, logFC, DE))
+
+mat_corrected <- limma::removeBatchEffect(
+  mat, sns_total_ext_metadata$gender, batch2 = sns_total_ext_metadata$batch,
+  design = model.matrix(~ 0 + group, data = sns_total_ext_metadata))
+
+# compute Z-score per comparison
+ll <- lapply(split(1:ncol(mat_corrected), 
+                   paste(sns_total_ext_metadata$age, 
+                         sns_total_ext_metadata$fraction)), FUN=function(x){
+  t(scale(t(mat_corrected[,x])))
+})
+mat_batch_corrected_scaled <- do.call(cbind, ll)[,colnames(mat)]
+
+## rename the metadata levels for the legend
+sns_total_ext_metadata$gender <- plyr::revalue(sns_total_ext_metadata$gender,
+                                               c("f"="Female", "m"="Male"))
+sns_total_ext_metadata$fraction <- plyr::revalue(sns_total_ext_metadata$fraction, 
+                                                 c("H"="total"))
+sns_total_ext_metadata$age <- plyr::revalue(sns_total_ext_metadata$age, 
+                                            c("1_mo" = "1 month", 
+                                              "6_mo" = "6 months"))
+
+custom_heatmap(mat_batch_corrected_scaled, "z-score", 
+               "DE genes in SNS 6 month KI vs. SNS 6 month WT", 
+               metadata = sns_total_ext_metadata, 
+               outfile = file.path(fig_dir, "fig3_supp","sns_DE_heatmap_Zscore_removeBatchEffect.pdf"))
+```
+
+
+
+Two seperate pdf for SNS and total cortex.
+```{r}
+custom_heatmap_seperate <- function(mat, mat_type, mat_title, metadata, outfile, 
+                                    col_fun = colorRamp2(c(-1, 0, 1), 
+                                                         c("#117733", "white", "#882255"))){
+  ha <- HeatmapAnnotation(genotype = anno_block(gp = gpar(col = "white"),
+                                                labels = c(rep(unique(metadata$genotype), 2)),
+                                                labels_gp = gpar(col = "black", fontsize = 12),
+                                                height = unit(8, "mm")),
+                          age = anno_block(gp = gpar(col = "white"),
+                                                labels = c(rep(unique(metadata$age), each = 2)),
+                                                labels_gp = gpar(col = "black", fontsize = 12),
+                                           which = "column",
+                                           height = unit(8, "mm")))
+   
+  hm <- Heatmap(mat, name = mat_type, 
+                column_title = mat_title,
+                col = col_fun, 
+                column_split = data.frame(
+                  factor(metadata$age, levels = unique(metadata$age)), 
+                  factor(metadata$genotype, 
+                         levels = unique(metadata$genotype))),
+                row_split = de_direction, top_annotation = ha,
+                show_column_names = FALSE, cluster_column_slices = FALSE, 
+                show_column_dend = FALSE,
+                cluster_rows = FALSE, show_row_dend = FALSE,
+                column_dend_height = unit(0.5, "cm"), row_title_rot = 0,
+                row_gap = unit(2, "mm"), 
+                column_gap = unit(c(1, 4, 1), "mm"))
+  
+  pdf(file = outfile, width = 5 , height = 6)
+  draw(hm,merge_legend = TRUE, ht_gap = unit(0.5, "cm"))
+  dev.off()
+  draw(hm,merge_legend = TRUE, ht_gap = unit(0.5, "cm"))
+}
+```
+
+
+```{r}
+sns_id <- sns_total_ext_metadata$fraction == "SNS"
+total_id <- sns_total_ext_metadata$fraction == "total"
+
+## We use the same legend for the two plots so we can actually compare the colors
+col_fun = colorRamp2(c(quantile(mat_batch_corrected_scaled, 0.01), 0, 
+                       quantile(mat_batch_corrected_scaled, 0.99)), 
+                     c("#117733", "white", "#882255"))
+
+custom_heatmap_seperate(mat_batch_corrected_scaled[,sns_id], "z-score", 
+               "cortical SNS", 
+               metadata = sns_total_ext_metadata[sns_id,], 
+               outfile = file.path(fig_dir, "fig3_supp","sns_DE_heatmap_Zscore_removeBatchEffect_SNS.pdf"),
+               col_fun = col_fun)
+
+custom_heatmap_seperate(mat_batch_corrected_scaled[,total_id], "z-score", 
+               "total cortex", 
+               metadata = sns_total_ext_metadata[total_id,], 
+               outfile = file.path(fig_dir, "fig3_supp","sns_DE_heatmap_Zscore_removeBatchEffect_total.pdf"),
+               col_fun = col_fun)
+```
+
+
+
+## per-sample log2FC 
+
+We plot the per-sample logFC to the mean of the respective WT if the same fraction and age:
+sample logCPM / mean(control logCPMs)
+We cannot correct for batch effects, because batch 4 is confounded with the homogenate, 1 month, WT samples!
+
+```{r}
+by <- paste(sns_total_ext_metadata$fraction, sns_total_ext_metadata$age)
+controls <- which(sns_total_ext_metadata$genotype == "WT")
+
+## compute the log2FC (of the logCPMs) based on the time, fraction and gender
+i <- split(1:ncol(mat_corrected),by)
+lfc <- do.call(cbind, lapply(i, FUN = function(x){
+    c2 <- intersect(x, controls)
+    mat_corrected[, x, drop = FALSE] - 
+      rowMeans(mat_corrected[, c2, drop = FALSE], na.rm = TRUE)
+}))
+lfc <- lfc[, colnames(mat_corrected)]
+
+custom_heatmap(lfc, "log2FC", 
+               "DE genes in SNS 6 month KI vs. SNS 6 month WT", 
+               metadata = sns_total_ext_metadata, 
+               outfile = file.path(fig_dir, "fig3_supp", "sns_DE_heatmap_log2FC_to_mean_control_logCPM_removeBatchEffect.pdf"))
+```
+
+
+Two seperate figures
+```{r}
+col_fun = colorRamp2(c(quantile(lfc, 0.01), 0, 
+                       quantile(lfc, 0.99)), 
+                     c("#117733", "white", "#882255"))
+
+custom_heatmap_seperate(lfc[,sns_id], "log2FC", 
+               "cortical SNS", 
+               metadata = sns_total_ext_metadata[sns_id,], 
+               outfile = file.path(fig_dir, "fig3", "sns_DE_heatmap_log2FC_to_mean_control_logCPM_removeBatchEffect_SNS.pdf"),
+               col_fun = col_fun)
+
+custom_heatmap_seperate(lfc[,total_id], "log2FC", 
+               "total cortex", 
+               metadata = sns_total_ext_metadata[total_id,], 
+               outfile = file.path(fig_dir, "fig3_supp","sns_DE_heatmap_log2FC_to_mean_control_logCPM_removeBatchEffect_total.pdf"),
+               col_fun = col_fun)
+```
+
+
+# ORA of up- and downregulated genes
+
+We import the goana results created in the the de_analysis.Rmd document.
+```{r}
+goana_up_cc <- fread(file.path(rnaseq_dir, "results/goana_CC_SNS.KI.6_mo_vs_SNS.WT.6_mo_up.txt"), header = TRUE)
+goana_up_bp <- fread(file.path(rnaseq_dir, "results/goana_BP_SNS.KI.6_mo_vs_SNS.WT.6_mo_up.txt"), header = TRUE)
+goana_up_mf <- fread(file.path(rnaseq_dir, "results/goana_MF_SNS.KI.6_mo_vs_SNS.WT.6_mo_up.txt"), header = TRUE)
+
+goana_down_cc <- fread(file.path(rnaseq_dir, "results/goana_CC_SNS.KI.6_mo_vs_SNS.WT.6_mo_down.txt"), header = TRUE)
+goana_down_bp <- fread(file.path(rnaseq_dir, "results/goana_BP_SNS.KI.6_mo_vs_SNS.WT.6_mo_down.txt"), header = TRUE)
+goana_down_mf <- fread(file.path(rnaseq_dir, "results/goana_MF_SNS.KI.6_mo_vs_SNS.WT.6_mo_down.txt"), header = TRUE)
+```
+
+
+## Circle plot for ORA results
+
+Combined plot with the most important terms from all three ontologies:
+
+```{r ORA-circle-plot-combined, cache = TRUE, dependson="ORA-SNS-up"}
+## DE up
+# CC: 1, 5, 10, 14, 17
+# BP: 1, 4, 10, 11, 12, 17
+# MF: 1, 8, 10, 13
+df_comb <- rbind(goana_up_cc[c(1, 5, 10, 14),], 
+                 goana_up_bp[c(1, 4, 10, 17),],
+                 goana_up_mf[c(1, 8, 10),])
+
+ggplot(df_comb, aes(x = -log10(P.DE), y = log2(DE), size = log2(N), fill = Ont)) + 
+  geom_point(shape = 21, alpha = 0.8)  +
+  theme_bw() +
+  theme(text = element_text(size = 20), 
+        aspect.ratio = 1, 
+        legend.position = "bottom", legend.direction="horizontal", 
+        legend.box = "horizontal")  +
+  geom_text_repel(aes(label=Term), size=5, data=df_comb, color = "black", 
+                  point.padding = 0.5, box.padding = 0.4, xlim = c(15, 160)) +
+  scale_size(breaks=pretty_breaks(4), range = c(3, 13)) +
+  guides(size = guide_legend("log2(genes with GO term)", title.position = "top"),
+         fill = guide_legend("Ontology", title.position = "top", 
+                             override.aes = list(size=5))) +
+  labs(x = "-log10(p-value)", y = "log2(DE genes with GO term)") +
+  scale_fill_locuszoom()
+ggsave(file.path(fig_dir, "fig3_supp","ORA_circle_plot_combined_SNS_up.pdf"), 
+       width = 6.5, height = 7.5)
+
+
+## Downregulated genes
+# CC: 1
+# BP: 1, 4, 6, 8
+# MG: 1, 2
+df_comb <- rbind(goana_down_cc[1,], 
+                 goana_down_bp[c(1, 4, 6, 8),],
+                 goana_down_mf[c(1,2),])
+ggplot(df_comb, aes(x = -log10(P.DE), y = log2(DE), size = log2(N), fill = Ont)) + 
+  geom_point(shape = 21, alpha = 0.8)  +
+  theme_bw() +
+  theme(text = element_text(size = 20), 
+        aspect.ratio = 1, 
+        legend.position = "bottom", legend.direction="horizontal", 
+        legend.box = "horizontal")  +
+  geom_text_repel(aes(label=Term), size=5, data=df_comb, color = "black", 
+                  point.padding = 0.5, box.padding = 0.4, xlim = c(4.2, NA)) +
+  scale_size(breaks=pretty_breaks(4), range = c(3, 13)) +
+  guides(size = guide_legend("log2(genes with GO term)", title.position = "top"),
+         fill = guide_legend("Ontology", title.position = "top", 
+                             override.aes = list(size=5))) +
+  labs(x = "-log10(p-value)", y = "log2(DE genes with GO term)") +
+  scale_fill_locuszoom()
+
+ggsave(file.path(fig_dir, "fig3_supp","ORA_circle_plot_combined_SNS_down.pdf"), 
+       width = 6.5, height = 7.5)
+```
+
+
+## Chord diagram of GO terms
+
+We plot a chord diagram to visualize the types of GO terms that are enriched in the list of DE genes in 6 months KI SNS.
+Additionally, we select only the "synapse" related terms and visualize the subclassification (GABA, glutamatergic, pre- and post-synapse)
+We create a plot for each of the three GO ontologies.
+
+We manually pick a set of GO terms that we want to visualize.
+
+```{r}
+
+```
+
+
+
+
+
+# MS
+
+##  Volcano plot
+
+```{r}
+ggplotVolcano_MS <- function(dat, outfile, alpha = 0.8, FUS_targets = NULL, 
+                          color_targets = FALSE, gene_labels = NULL, 
+                          protein_labels = NULL, label_coord = 1.5, 
+                          x_range = NULL, y_range = NULL, logFC_cutoff = 1, 
+                          col = c("#882255", "#117733"), title = NULL){
+
+  dat <- dat[!is.na(dat$PValue),]
+  dat$mlog10adjPValue <- -log10(dat$adjPValue)
+  df <- data.frame(logFC = dat$logFC, mlog10adjPValue = dat$mlog10adjPValue, 
+                   adjPValue = dat$adjPValue, gene = dat$gene_name, 
+                   protein = dat$protein_name)
+  
+  p <- ggplot(df, aes(x = logFC, y = mlog10adjPValue))
+   
+  if(is.null(FUS_targets)){
+    cols <- factor(ifelse(df$logFC > 1, "adjPValue \u2264 0.05\nor logFC > 1",
+                          ifelse(df$logFC < -1, "adjPValue \u2264 0.05\nor logFC < -1", "not changed")),
+                   levels = c("not changed", "adjPValue \u2264 0.05\nor logFC < -1", 
+                              "adjPValue \u2264 0.05\nor logFC > 1"))
+     p <- p + geom_point(alpha = alpha, aes(color = cols)) +
+      scale_color_manual(values = c("adjPValue \u2264 0.05\nor logFC > 1" = col[1], 
+                                    "adjPValue \u2264 0.05\nor logFC < -1" = col[2],
+                                    "not changed" = "darkgrey"), 
+                         name = "Proteins")
+  } else {
+    if (color_targets){
+     df$cols <- factor(ifelse(df$gene %in% fus_genes, "FUS target",
+                              # ifelse(df$adjPValue <= 0.05,
+                                     ifelse(df$logFC > 1, "adjPValue \u2264 0.05\nor logFC > 1",
+                                            ifelse(df$logFC < -1, "adjPValue \u2264 0.05\nor logFC < -1", "not changed"))
+                                            # ,"not selected"))
+                          ), levels = c("not changed", "adjPValue \u2264 0.05\nor logFC < -1", 
+                                        "adjPValue \u2264 0.05\nor logFC > 1", "FUS target"))
+      p <- p + geom_point(data = df %>% dplyr::arrange(cols), 
+                          aes(color = cols), alpha = alpha) + 
+        scale_color_manual(name = "Proteins", 
+                           values = c("FUS target" = "steelblue3", 
+                                      "not changed" = "darkgrey", 
+                                      "adjPValue \u2264 0.05\nor logFC > 1" = col[1], 
+                                      "adjPValue \u2264 0.05\nor logFC < -1" = col[2]))
+     } else{
+      p <- p + geom_point(data = df %>% filter(!gene %in% FUS_targets), 
+                   aes(color = "darkgrey"), alpha = alpha) + 
+        geom_point(data = df %>% filter(gene %in% FUS_targets),
+               aes(color = "red"), alpha = alpha) +
+      scale_color_manual(name = "FUS targets", labels = c("FALSE", "TRUE"), 
+                         values = c("darkgrey", "red"))
+    }
+  }
+  p <- p + theme_bw() +
+    theme(text = element_text(size = 16), 
+          plot.title = element_text(hjust = 0.5)) + 
+    ylab("-log10(adjPValue)") 
+  
+  if(!is.null(gene_labels)){
+    repel <- df %>% filter(gene %in% gene_labels) %>% 
+      arrange(desc(mlog10adjPValue))
+    p <- p + geom_text_repel(data = repel %>% filter(logFC > 0), 
+                           aes(label = protein), xlim = c(label_coord, NA), 
+                           segment.color = "grey30", show.legend = FALSE) +
+      geom_text_repel(data = repel %>% filter(logFC < 0), 
+                      aes(label = protein), xlim = c(NA, -label_coord), 
+                      segment.color = "grey30", show.legend = FALSE)
+  }
+  if(!is.null(protein_labels)){
+    repel <- df %>% filter(protein %in% protein_labels) %>% 
+      arrange(desc(mlog10adjPValue))
+    p <- p + geom_text_repel(data = repel %>% filter(logFC > 0), 
+                           aes(label = protein), xlim = c(label_coord, NA), 
+                           segment.color = "grey30", show.legend = FALSE) +
+      geom_text_repel(data = repel %>% filter(logFC < 0), 
+                      aes(label = protein), xlim = c(NA, -label_coord), 
+                      segment.color = "grey30", show.legend = FALSE)
+  }
+
+
+  ## x and y-axis range
+  if(!is.null(x_range) & !is.null(y_range)){
+      p <- p + coord_cartesian(xlim = c(-x_range, x_range), ylim = c(0, y_range))
+  }
+  
+  if (!is.null(title)){
+  p <- p + ggtitle(title)
+  }
+  
+  ## draw line at adjPValue cutoff and end x = 0 
+  p <- p + theme(aspect.ratio = 1) + 
+    geom_hline(yintercept = -log10(0.05), linetype="dashed", color = "black")  +
+    geom_vline(xintercept = -logFC_cutoff, linetype = "dashed", color = "black") +
+    geom_vline(xintercept = logFC_cutoff, linetype = "dashed", color = "black")
+   
+  print(p)
+  ggsave(filename = outfile, plot = p, width = 7, height = 6, type = "cairo", 
+         dpi = 500)
+}
+```
+
+
+```{r}
+dat_ms1 <- fread(ms_results, header = TRUE)
+nrow_full <- nrow(dat_ms1)
+## Remove all proteins with NAs in more than two of of 4 replicates per group
+tmp <- dat_ms1 %>% select(ends_with(".raw"))
+dat_ms1 <- dat_ms1 %>%
+mutate(NA_sum_KI = rowSums(is.na(tmp %>% select(ends_with("Knock_in.raw")))),
+       NA_sum_WT = rowSums(is.na(tmp %>% select(ends_with("Wild_Type.raw"))))) 
+rm(tmp)
+dat_ms <- dat_ms1 %>%
+  filter(NA_sum_KI < 2 & NA_sum_WT < 2)
+## number of filtered rows and percentage:
+nrow_full-nrow(dat_ms)
+(nrow_full-nrow(dat_ms))/nrow_full*100
+
+
+dat_ms <- dat_ms %>% dplyr::select(P.Value, adj.P.Val, log2FC_MS, gene_name, protein_name, gene_id, SP) %>%
+  dplyr::rename(PValue = P.Value, adjPValue = adj.P.Val, logFC = log2FC_MS) %>%
+  mutate(protein_name = str_remove(protein_name, pattern = "_MOUSE"))
+
+x_range <- 0
+y_range <- 0
+dat_ms <- dat_ms[!is.na(dat_ms$PValue),]
+x_range<- max(x_range, max(abs(dat_ms$logFC)))
+y_range <- max(y_range, max(-log10(dat_ms$adjPValue)))
+x_range
+y_range
+
+## We use lighter version of the green and red from the RNA-seq volcano plot
+## since we do not want to indicate significance but only a trend
+lighten <- function(color, factor = 0.5) {
+  if ((factor > 1) | (factor < 0)) stop("factor needs to be within [0,1]")
+  col <- col2rgb(color)
+  col <- col + (255 - col)*factor
+  col <- rgb(t(col), maxColorValue=255)
+  col
+}
+## red and green
+cols <- c("#882255", "#117733")
+light_cols <- c(lighten(cols[1], 0.4), lighten(cols[2], 0.4))
+
+file_name <- file.path(fig_dir, "fig3", "volcano_MS_FUS_targets.png")
+ggplotVolcano_MS(dat_ms, file_name, label_coord = 3, 
+              x_range = x_range, y_range = y_range, gene_labels = gene_labels,
+              FUS_targets = fus_genes, color_targets = TRUE, col = light_cols, 
+              title = "experiment 1")
+
+
+## Labelling the proteins with lowest adj. p-value and highest logFC
+top_labs <- dat_ms %>% 
+  arrange(adjPValue, desc(logFC)) %>%
+  dplyr::slice(1:20) %>%
+  dplyr::pull(protein_name)
+
+top_FC <- dat_ms %>% 
+  arrange(desc(abs(logFC))) %>% 
+  dplyr::slice(1:15) %>%
+  dplyr::pull(protein_name)
+
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_FUS_targets_top_labels.png")
+ggplotVolcano_MS(dat_ms, file_name, label_coord = 2, 
+              x_range = x_range, y_range = y_range, protein_labels = unique(c(top_labs, top_FC)),
+              FUS_targets = fus_genes, color_targets = TRUE, col = light_cols, 
+              title = "experiment 1")
+
+
+## without any labels
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_1_no_label.png")
+ggplotVolcano_MS(dat_ms, file_name, label_coord = 2.5, 
+              x_range = x_range, y_range = y_range,  gene_labels = "Fus", 
+              color_targets = TRUE, FUS_targets = fus_genes,
+              col = light_cols, title = "experiment 1")
+```
+
+
+## Second MS experiment
+
+```{r}
+ms2 <- fread(ms_2_results, header = TRUE)
+nrow_full <- nrow(ms2)
+## Remove all proteins with NAs in more than two of of 4 replicates per group
+tmp <- ms2 %>% select(ends_with(".raw"))
+ms2 <- ms2 %>%
+mutate(NA_sum_KI = rowSums(is.na(tmp %>% select(ends_with("Knock.in.raw")))),
+       NA_sum_WT = rowSums(is.na(tmp %>% select(ends_with("Wild_Type.raw"))))) 
+rm(tmp)
+ms2 <- ms2 %>%
+  filter(NA_sum_KI < 2 & NA_sum_WT < 2)
+## number of filtered rows and percentage:
+nrow_full-nrow(ms2)
+(nrow_full-nrow(ms2))/nrow_full*100
+
+dat_ms2 <- ms2 %>% dplyr::select(P.Value, adj.P.Val, log2FC_MS, gene_name, protein_name, gene_id, SP) %>%
+  dplyr::rename(PValue = P.Value, adjPValue = adj.P.Val, logFC = log2FC_MS) %>%
+  mutate(protein_name = str_remove(protein_name, pattern = "_MOUSE"))
+  
+x_range <- 0
+y_range <- 0
+dat_ms2 <- dat_ms2[!is.na(dat_ms2$PValue),]
+x_range<- max(x_range, max(abs(dat_ms2$logFC)))
+y_range <- max(y_range, max(-log10(dat_ms2$adjPValue)))
+x_range
+y_range
+
+## red and green
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_2_FUS_targets.png")
+ggplotVolcano_MS(dat_ms2, file_name, label_coord = 2.2, 
+              x_range = x_range, y_range = y_range, gene_labels = gene_labels,
+              FUS_targets = fus_genes, color_targets = TRUE, col = light_cols, 
+              title = "experiment 2")
+
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_2.png")
+ggplotVolcano_MS(dat_ms2, file_name, label_coord = 3, 
+              x_range = x_range, y_range = y_range, 
+              col = light_cols, title = "experiment 2")
+
+
+
+## Labelling the proteins with lowest adj. p-value and highest logFC
+top_labs <- dat_ms2 %>% 
+  arrange(adjPValue, desc(logFC)) %>%
+  dplyr::slice(1:20) %>%
+  dplyr::pull(protein_name)
+
+top_FC <- dat_ms2 %>% 
+  arrange(desc(abs(logFC))) %>% 
+  dplyr::slice(1:15) %>%
+  dplyr::pull(protein_name)
+
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_2_FUS_targets_top_labels.png")
+ggplotVolcano_MS(dat_ms2, file_name, label_coord = 2,
+              x_range = x_range, y_range = y_range, protein_labels = unique(c(top_labs, top_FC)),
+              FUS_targets = fus_genes, color_targets = TRUE, col = light_cols, 
+              title = "experiment 2")
+
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_2_top_labels.png")
+ggplotVolcano_MS(dat_ms2, file_name, label_coord = 2, 
+              x_range = x_range, y_range = y_range, protein_labels = unique(c(top_labs, top_FC)),
+              col = light_cols, 
+              title = "experiment 2")
+```
+
+
+
+Volcano plots with the same axis as the first experiment for comparison
+```{r}
+x_range <- 0
+y_range <- 0
+x_range<- max(x_range, max(abs(dat_ms$logFC), abs(dat_ms2$logFC)))
+y_range <- max(y_range, max(-log10(dat_ms$adjPValue), -log10(dat_ms2$adjPValue)))
+x_range
+y_range
+
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_1_same_axis.png")
+ggplotVolcano_MS(dat_ms, file_name, 
+              x_range = x_range, y_range = y_range, 
+              col = light_cols, title = "experiment 1")
+
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_2_same_axis.png")
+ggplotVolcano_MS(dat_ms2, file_name, label_coord = 3, 
+              x_range = x_range, y_range = y_range, 
+              col = light_cols, title = "experiment 2")
+
+## FUS targets labeled
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_1_same_axis_FUS_targets.png")
+ggplotVolcano_MS(dat_ms, file_name, label_coord = 2.5, 
+              x_range = x_range, y_range = y_range, 
+              FUS_targets = fus_genes, color_targets = TRUE, protein_labels = "FUS",
+              col = light_cols, title = "experiment 1")
+
+file_name <- file.path(fig_dir, "fig3_supp", "volcano_MS_experiment_2_same_axis_FUS_targets.png")
+ggplotVolcano_MS(dat_ms2, file_name, label_coord = 2.5, 
+              x_range = x_range, y_range = y_range, 
+              FUS_targets = fus_genes, color_targets = TRUE, protein_labels = "FUS",
+              col = light_cols, title = "experiment 2")
+```
+
+
+
+
+# Comparison of the two experiments
+
+```{r}
+ms_full <- dat_ms1 %>% inner_join(ms2, by = "ProteinName", suffix = c("_1", "_2"))
+```
+
+Do both table have the same protein groups?
+```{r}
+ms_full %>% group_by(ID_1) %>% summarise(sum_ID_2 = length(unique(ID_2))) %>% pull(sum_ID_2) %>% table
+```
+Yes they do, they used the same peptide database for both experiments.
+
+We compare the log2FC of each protein in the first and second experiment.
+```{r}
+dat_full <- dat_ms2 %>% dplyr::select(PValue, adjPValue, logFC, SP) %>%
+  inner_join(dat_ms %>% dplyr::select(PValue, adjPValue, logFC, SP), 
+             by = c("SP"), suffix = c("_2", "_1")) %>% unique
+
+## what are the SP IDs for the FUS targets?
+target_sp <- ms2[ms2$FUS_target == "Yes", c("SP", "gene_name", "protein_name")] %>% 
+  mutate(FUS_target = TRUE)
+dat_full <- dat_full %>% left_join(target_sp) %>% 
+  mutate(FUS_target=replace(FUS_target, is.na(FUS_target), FALSE)) 
+# label FUS
+fus_sp <- ms2[ms2$protein_name == "FUS","SP"]
+dat_full[dat_full$SP == fus_sp, c("gene_name", "protein_name")] <- c("Fus", "FUS")
+
+## add marginal density
+max_range <- 0
+dat_full <- dat_full[!is.na(dat_full$logFC_1) & !is.na(dat_full$logFC_2),]
+max_range <- max(max_range, max(abs(dat_full$logFC_1), max(abs(dat_full$logFC_2))))
+
+p <- ggplot(dat_full, aes(x = logFC_1, y = logFC_2)) +
+  geom_point(alpha = 0.7) + 
+  geom_density_2d(colour="#F3AA06") + 
+  theme_bw(base_size = 20) + 
+  xlab("log2FC experiment 1") +  ylab("log2FC experiment 2") +
+  theme(aspect.ratio = 1) + 
+  scale_x_continuous(limits = c(-max_range, max_range)) + 
+  scale_y_continuous(limits = c(-max_range, max_range)) +
+  geom_text_repel(data = dat_full %>% dplyr::filter(protein_name == "FUS"),
+                aes(label = protein_name), show.legend = FALSE)
+ggMarginal(p, type = "density", col = "#F3AA06", fill = "#F3AA06")
+ggsave(filename = file.path(fig_dir, "fig3_supp", "log2FC_experiment_1_2_marginal.pdf"), 
+       plot = ggMarginal(p, type = "density", col = "#F3AA06", fill = "#F3AA06"))
+
+
+## FUS targets labelled
+p <- ggplot(dat_full %>% dplyr::arrange(FUS_target), aes(x = logFC_1, y = logFC_2, color = FUS_target)) +
+  geom_point(size = 2, alpha = 0.7) + 
+  geom_density_2d(colour="#F3AA06") + 
+  theme_bw(base_size = 20) + 
+  xlab("log2FC experiment 1") +  ylab("log2FC experiment 2") +
+  theme(aspect.ratio = 1, legend.position = "bottom") + 
+  scale_x_continuous(limits = c(-max_range, max_range)) + 
+  scale_y_continuous(limits = c(-max_range, max_range)) +
+  scale_color_manual(name = "proteins", labels = c("no FUS target", "FUS target"), 
+                     values = c("black", "steelblue3")) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  geom_text_repel(data = dat_full %>% dplyr::filter(protein_name == "FUS"),
+                  aes(label = protein_name), show.legend = FALSE)
+ggMarginal(p, type = "density", col = "#F3AA06", fill = "#F3AA06")
+ggsave(filename = file.path(fig_dir, "fig3_supp", "log2FC_experiment_1_2_marginal_FUS_targets.pdf"), 
+       plot = ggMarginal(p, type = "density", col = "#F3AA06", fill = "#F3AA06"))
+```
+
